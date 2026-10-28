@@ -1012,6 +1012,3 @@ Untuk pertanyaan teknis, bug report, feature request, atau proposal kolaborasi, 
 ![Made with purpose](https://img.shields.io/badge/Made_with_purpose_by-Thunders_Foundation-6366F1?style=for-the-badge)
 
 </div>
-2. Tambahkan screenshot dashboard asli begitu UI siap
-3. Sesuaikan badge status menjadi "Active" setelah MVP dirilis
-4. Tambahkan file `LICENSE`, `CONTRIBUTING.md`, dan `SECURITY.md` di repositori GitHub Anda
