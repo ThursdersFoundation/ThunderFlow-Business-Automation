@@ -1,0 +1,192 @@
+# =============================================================================
+# ThunderFlow Business Automation — Local development stack
+# =============================================================================
+# Spins up the full backing services the Next.js app expects:
+#   - Postgres 16 (primary database + Prisma)
+#   - Redis 7 (BullMQ queues, rate-limit cache, realtime fan-out)
+#   - MinIO   (S3-compatible object storage for uploads / exports)
+#   - Mailpit  (local SMTP catch-all so dev emails never leave your machine)
+#
+# Usage:
+#   cp .env.example .env.local   # then edit secrets
+#   docker compose up -d
+#   docker compose logs -f postgres redis minio mailpit
+#   docker compose down          # stop services
+#   docker compose down -v       # stop AND wipe volumes (destructive)
+#
+# Connect:
+#   Postgres → postgresql://thunder:thunder@localhost:5432/thunderflow
+#   Redis    → redis://localhost:6379
+#   MinIO    → http://localhost:9000  (console: http://localhost:9001)
+#   Mailpit  → http://localhost:8025
+# =============================================================================
+
+name: thunderflow
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 — primary datastore
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: thunderflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: thunder
+      POSTGRES_PASSWORD: thunder
+      POSTGRES_DB: thunderflow
+      # Tuning for a dev laptop: keep memory small and fsync on for safety.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Optional seed script — drop .sql files in ./docker/postgres/init.d.
+      - ./docker/postgres/init.d:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U thunder -d thunderflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - thunderflow-net
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 — queues, cache, realtime
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: thunderflow-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - thunderflow-net
+
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-compatible object storage
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: thunderflow-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: thunderflow
+      MINIO_ROOT_PASSWORD: thunderflow-secret
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - thunderflow-net
+
+  # One-shot bucket creator — provisions the default bucket on first boot.
+  createbucket:
+    image: minio/mc:latest
+    container_name: thunderflow-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 thunderflow thunderflow-secret &&
+      mc mb --ignore-existing local/thunderflow-uploads &&
+      mc anonymous set download local/thunderflow-uploads &&
+      echo 'Bucket thunderflow-uploads ready.';
+      "
+    networks:
+      - thunderflow-net
+
+  # ---------------------------------------------------------------------------
+  # Mailpit — local SMTP catch-all for transactional emails
+  # ---------------------------------------------------------------------------
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: thunderflow-mailpit
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI
+    networks:
+      - thunderflow-net
+
+  # ---------------------------------------------------------------------------
+  # (Optional) App service — uncomment to run the Next.js app in containers
+  # instead of `pnpm dev` on your host. Build the image first with:
+  #   docker build -t thunderflow-app:dev .
+  # ---------------------------------------------------------------------------
+  # app:
+  #   image: thunderflow-app:dev
+  #   container_name: thunderflow-app
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     minio:
+  #       condition: service_healthy
+  #   environment:
+  #     DATABASE_URL: postgresql://thunder:thunder@postgres:5432/thunderflow?schema=public
+  #     REDIS_URL: redis://redis:6379
+  #     S3_ENDPOINT: http://minio:9000
+  #     S3_BUCKET: thunderflow-uploads
+  #     S3_ACCESS_KEY_ID: thunderflow
+  #     S3_SECRET_ACCESS_KEY: thunderflow-secret
+  #     S3_FORCE_PATH_STYLE: "true"
+  #     S3_PUBLIC_BASE_URL: http://localhost:9000/thunderflow-uploads
+  #     NODE_ENV: development
+  #   ports:
+  #     - "3000:3000"
+  #   command: pnpm dev
+  #   volumes:
+  #     - .:/app
+  #     - /app/node_modules
+  #   networks:
+  #     - thunderflow-net
+
+# =============================================================================
+# Volumes — persistent across container restarts
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  thunderflow-net:
+    driver: bridge
